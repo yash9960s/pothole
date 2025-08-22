@@ -10,7 +10,9 @@
         h1 { color: #333; }
         .option-box { margin: 2rem 0; padding: 2rem; border: 1px solid #ccc; border-radius: 8px; }
         .separator { margin: 2rem 0; font-weight: bold; }
-        #video-feed { width: 100%; max-width: 800px; height: auto; border: 1px solid #ddd; }
+        #live-feed-container { position: relative; width: 100%; max-width: 800px; margin: auto; }
+        #live-feed { width: 100%; height: auto; border: 1px solid #ddd; border-radius: 8px; display: none; }
+        #processed-feed { width: 100%; height: auto; border: 1px solid #ddd; border-radius: 8px; display: none; margin-top: 10px; }
         img { max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 8px; margin-top: 20px; }
         .output-box { margin-top: 2rem; }
     </style>
@@ -36,7 +38,10 @@
             <button onclick="startCamera()">Start Camera</button>
             <button onclick="stopCamera()">Stop Camera</button>
             <br>
-            <img id="video-feed" src="" alt="Video Feed">
+            <div id="live-feed-container">
+                <video id="live-feed" autoplay playsinline></video>
+                <img id="processed-feed" src="" alt="Processed Video Feed">
+            </div>
         </div>
 
         {% if uploaded_image or txt_output %}
@@ -56,17 +61,69 @@
     </div>
 
     <script>
-        const videoElement = document.getElementById('video-feed');
-        const videoUrl = "{{ video_url }}";
-        
-        function startCamera() {
-            videoElement.src = videoUrl;
-            videoElement.style.display = 'block';
+        const liveFeed = document.getElementById('live-feed');
+        const processedFeed = document.getElementById('processed-feed');
+        const canvas = document.createElement('canvas');
+        const context = canvas.getContext('2d');
+        let stream = null;
+        let streaming = false;
+
+        async function startCamera() {
+            try {
+                liveFeed.style.display = 'block';
+                processedFeed.style.display = 'block';
+
+                stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+                liveFeed.srcObject = stream;
+                streaming = true;
+                liveFeed.play();
+                liveFeed.onloadedmetadata = () => {
+                    canvas.width = liveFeed.videoWidth;
+                    canvas.height = liveFeed.videoHeight;
+                    sendFrame();
+                };
+            } catch (err) {
+                console.error("Error accessing the camera: ", err);
+                alert("Could not access the camera. Please check permissions.");
+                streaming = false;
+            }
         }
 
         function stopCamera() {
-            videoElement.src = "";
-            videoElement.style.display = 'none';
+            streaming = false;
+            if (stream) {
+                const tracks = stream.getTracks();
+                tracks.forEach(track => track.stop());
+            }
+            liveFeed.style.display = 'none';
+            processedFeed.style.display = 'none';
+        }
+
+        async function sendFrame() {
+            if (!streaming) return;
+
+            context.drawImage(liveFeed, 0, 0, canvas.width, canvas.height);
+            const dataUrl = canvas.toDataURL('image/jpeg');
+            const blob = await fetch(dataUrl).then(res => res.blob());
+            const formData = new FormData();
+            formData.append('frame', blob, 'frame.jpg');
+
+            try {
+                const response = await fetch('/process_video', {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                if (response.ok) {
+                    const blob = await response.blob();
+                    const imageUrl = URL.createObjectURL(blob);
+                    processedFeed.src = imageUrl;
+                }
+            } catch (error) {
+                console.error("Error sending frame to server: ", error);
+            }
+
+            requestAnimationFrame(sendFrame);
         }
     </script>
 </body>
