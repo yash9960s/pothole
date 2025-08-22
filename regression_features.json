@@ -1,0 +1,12 @@
+{
+  "feature_order": [
+    "confidence",
+    "x_min",
+    "y_min",
+    "x_max",
+    "y_max",
+    "midas_bbox_mean",
+    "midas_scene_median",
+    "midas_rel"
+  ]
+}

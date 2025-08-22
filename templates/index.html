@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pothole Detection</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; margin: 2rem; }
+        .container { max-width: 800px; margin: auto; }
+        h1 { color: #333; }
+        .option-box { margin: 2rem 0; padding: 2rem; border: 1px solid #ccc; border-radius: 8px; }
+        .separator { margin: 2rem 0; font-weight: bold; }
+        #video-feed { width: 100%; max-width: 800px; height: auto; border: 1px solid #ddd; }
+        img { max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 8px; margin-top: 20px; }
+        .output-box { margin-top: 2rem; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Pothole Detection System</h1>
+        
+        <div class="option-box">
+            <h2>1. Upload an Image</h2>
+            <p>Select an image file to detect potholes.</p>
+            <form method="post" enctype="multipart/form-data">
+                <input type="file" name="file" accept="image/*" required>
+                <input type="submit" value="Upload Image">
+            </form>
+        </div>
+
+        <div class="separator">- OR -</div>
+
+        <div class="option-box">
+            <h2>2. Real-Time Detection</h2>
+            <p>Use your webcam for live pothole detection.</p>
+            <button onclick="startCamera()">Start Camera</button>
+            <button onclick="stopCamera()">Stop Camera</button>
+            <br>
+            <img id="video-feed" src="" alt="Video Feed">
+        </div>
+
+        {% if uploaded_image or txt_output %}
+        <div class="output-box">
+            <h2>Detection Results</h2>
+            {% if uploaded_image %}
+            <p><strong>Annotated Image:</strong></p>
+            <img src="{{ url_for('static', filename=uploaded_image) }}" alt="Annotated Image">
+            {% endif %}
+            
+            {% if txt_output %}
+            <p><strong>Text Output:</strong></p>
+            <a href="{{ url_for('static', filename=txt_output) }}" target="_blank">View Pothole Data</a>
+            {% endif %}
+        </div>
+        {% endif %}
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('video-feed');
+        const videoUrl = "{{ video_url }}";
+        
+        function startCamera() {
+            videoElement.src = videoUrl;
+            videoElement.style.display = 'block';
+        }
+
+        function stopCamera() {
+            videoElement.src = "";
+            videoElement.style.display = 'none';
+        }
+    </script>
+</body>
+</html>

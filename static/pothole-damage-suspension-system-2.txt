@@ -1,0 +1,5 @@
+Pothole 1:
+  - Dimensions: D:4.7cm, W:79.0cm, L:56.2cm
+  - 2W Impact: severe
+  - 4W Impact: moderate
+
