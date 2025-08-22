@@ -169,6 +169,7 @@ def process_frame(frame):
         y_offset += line_spacing # Increase offset for the next line
             
     return annotated_frame, pothole_info_list
+
 # --- FLASK ROUTES ---
 @app.route('/', methods=['GET', 'POST'])
 def upload_file():
@@ -218,31 +219,25 @@ def upload_file():
             
     return render_template('index.html', uploaded_image=uploaded_image, txt_output=txt_output, video_url=video_url)
 
-@app.route('/video_feed')
-def video_feed():
-    def generate_frames():
-        camera = cv2.VideoCapture(0)
-        if not camera.isOpened():
-            print("Error: Could not open camera.")
-            return
+@app.route('/process_video', methods=['POST'])
+def process_video():
+    if 'frame' not in request.files:
+        return '', 400
 
-        while True:
-            success, frame = camera.read()
-            if not success:
-                break
-            
-            # Process the frame with the full pipeline
-            processed_frame, _ = process_frame(frame)
+    frame_file = request.files['frame'].read()
+    np_array = np.frombuffer(frame_file, np.uint8)
+    frame = cv2.imdecode(np_array, cv2.IMREAD_COLOR)
 
-            ret, buffer = cv2.imencode('.jpg', processed_frame)
-            frame_bytes = buffer.tobytes()
+    if frame is None:
+        return '', 400
 
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+    processed_frame, _ = process_frame(frame)
+    
+    ret, buffer = cv2.imencode('.jpg', processed_frame)
+    response_bytes = buffer.tobytes()
 
-        camera.release()
+    return Response(response_bytes, mimetype='image/jpeg')
 
-    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 if __name__ == '__main__':
     def allowed_file(filename):
