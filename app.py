@@ -30,11 +30,14 @@ try:
     # YOLO model
     yolo_model = YOLO('best.pt')
 
-    # MiDaS from Hugging Face
-    processor = DPTImageProcessor.from_pretrained("Intel/dpt-hybrid-midas")
-    midas_model = DPTForDepthEstimation.from_pretrained("Intel/dpt-hybrid-midas").to(device).eval()
+    # MiDaS model (choose hybrid or large)
+    USE_LARGE = False  # set True if you want dpt-large (slower but more accurate)
+    MODEL_NAME = "Intel/dpt-large" if USE_LARGE else "Intel/dpt-hybrid-midas"
 
-    # Regression model + feature order
+    processor = DPTImageProcessor.from_pretrained(MODEL_NAME)
+    midas_model = DPTForDepthEstimation.from_pretrained(MODEL_NAME).to(device).eval()
+
+    # Regression model
     reg_model = joblib.load("regression_model.pkl")
     with open("regression_features.json") as f:
         feature_order = json.load(f)["feature_order"]
@@ -46,24 +49,6 @@ except FileNotFoundError as e:
     sys.exit()
 
 # --- HELPER FUNCTIONS ---
-def run_midas(frame):
-    """Run depth estimation using Hugging Face MiDaS"""
-    img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-    inputs = processor(images=img, return_tensors="pt").to(device)
-
-    with torch.no_grad():
-        outputs = midas_model(**inputs)
-        depth = outputs.predicted_depth
-
-    depth_resized = torch.nn.functional.interpolate(
-        depth.unsqueeze(1),
-        size=frame.shape[:2],
-        mode="bicubic",
-        align_corners=False
-    ).squeeze().cpu().numpy()
-
-    return depth_resized
-
 def impact_category(depth, width, length):
     two_wheeler = "low"
     four_wheeler = "low"
@@ -84,15 +69,33 @@ def impact_category(depth, width, length):
         
     return two_wheeler, four_wheeler
 
+def run_midas(frame):
+    """Run Hugging Face MiDaS on an OpenCV frame and return depth map"""
+    img_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    inputs = processor(images=img_pil, return_tensors="pt").to(device)
+
+    with torch.no_grad():
+        outputs = midas_model(**inputs)
+        depth = outputs.predicted_depth
+
+    depth_resized = torch.nn.functional.interpolate(
+        depth.unsqueeze(1),
+        size=frame.shape[:2],
+        mode="bicubic",
+        align_corners=False
+    ).squeeze().cpu().numpy()
+
+    return depth_resized
+
 def process_frame(frame):
     # Process with YOLOv8
     results = yolo_model(frame)
     annotated_frame = results[0].plot()
     
-    # List to collect all pothole data for display
+    # Collect all pothole data
     pothole_info_list = []
     
-    # Run MiDaS (Hugging Face)
+    # Run MiDaS depth
     depth_map = run_midas(frame)
 
     for r in results:
@@ -104,11 +107,10 @@ def process_frame(frame):
             x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
             confidence = float(box.conf.item())
 
-            # Check if bounding box is valid
             if (x2 - x1) <= 0 or (y2 - y1) <= 0:
                 continue
 
-            # --- MiDaS Depth Estimation & Feature Extraction ---
+            # MiDaS Depth Estimation
             pothole_area_depth = depth_map[y1:y2, x1:x2]
             if pothole_area_depth.size == 0:
                 continue
@@ -117,7 +119,7 @@ def process_frame(frame):
             midas_scene_median = float(np.median(depth_map))
             midas_rel = midas_bbox_mean - midas_scene_median
 
-            # --- Regression Model Prediction ---
+            # Regression Model Prediction
             features_dict = {
                 "confidence": confidence,
                 "x_min": x1, "y_min": y1, "x_max": x2, "y_max": y2,
@@ -129,10 +131,9 @@ def process_frame(frame):
             features = np.array([[features_dict[f] for f in feature_order]])
             pred_depth, pred_width, pred_length = reg_model.predict(features)[0]
 
-            # --- Impact Estimation ---
+            # Impact Estimation
             two_wheeler_impact, four_wheeler_impact = impact_category(pred_depth, pred_width, pred_length)
 
-            # --- Collect data for text output ---
             pothole_info_list.append({
                 "depth": pred_depth, 
                 "width": pred_width, 
@@ -141,7 +142,7 @@ def process_frame(frame):
                 "4W_impact": four_wheeler_impact
             })
 
-    # --- Add all collected info to top-left of the image ---
+    # --- Add text output ---
     y_offset = 40
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = 0.8
@@ -149,11 +150,13 @@ def process_frame(frame):
     line_spacing = 30
 
     for i, info in enumerate(pothole_info_list):
-        label = (f"Pothole {i+1}: D:{info['depth']:.1f}cm, W:{info['width']:.1f}cm, L:{info['length']:.1f}cm, "
-                 f"2W Impact:{info['2W_impact']}, 4W Impact:{info['4W_impact']}")
+        label = (f"Pothole {i+1}: D:{info['depth']:.1f}cm, W:{info['width']:.1f}cm, "
+                 f"L:{info['length']:.1f}cm, 2W:{info['2W_impact']}, 4W:{info['4W_impact']}")
         
         (text_width, text_height), baseline = cv2.getTextSize(label, font, font_scale, font_thickness)
-        cv2.rectangle(annotated_frame, (10, y_offset - text_height - 5), (10 + text_width, y_offset + baseline), (0, 0, 0), -1)
+        cv2.rectangle(annotated_frame, (10, y_offset - text_height - 5),
+                      (10 + text_width, y_offset + baseline), (0, 0, 0), -1)
+        
         cv2.putText(annotated_frame, label, (10, y_offset), font, font_scale, (0, 255, 0), font_thickness)
         y_offset += line_spacing
             
@@ -163,7 +166,6 @@ def process_frame(frame):
 @app.route('/', methods=['GET', 'POST'])
 def upload_file():
     video_url = url_for('video_feed')
-    
     uploaded_image = None
     txt_output = None
     pothole_data = None
@@ -180,18 +182,15 @@ def upload_file():
             file.save(str(filepath))
             file_stem = filepath.stem
 
-            # Process the uploaded image
             img = cv2.imread(str(filepath))
             processed_img, pothole_data = process_frame(img)
 
-            # Save the annotated image
             annotated_filename = 'annotated_' + filename
             annotated_path = Path(app.config['UPLOAD_FOLDER']) / annotated_filename
             cv2.imwrite(str(annotated_path), processed_img)
             
             uploaded_image = annotated_filename
             
-            # Save pothole data to TXT
             txt_filename = file_stem + '.txt'
             txt_path = Path(app.config['UPLOAD_FOLDER']) / txt_filename
             with open(str(txt_path), 'w') as f:
