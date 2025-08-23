@@ -9,24 +9,12 @@ from ultralytics import YOLO
 from werkzeug.utils import secure_filename
 import torch
 import sys
+from PIL import Image
+from transformers import DPTImageProcessor, DPTForDepthEstimation
 
 # --- PATHS ---
-MIDAS_PATH = 'MiDaS'
 UPLOAD_FOLDER = 'static'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
-
-# Add MiDaS to system path to allow imports
-sys.path.append(MIDAS_PATH)
-
-# --- MiDaS Imports ---
-try:
-    from midas.dpt_depth import DPTDepthModel
-    from midas.transforms import Resize, NormalizeImage, PrepareForNet
-    import torchvision.transforms as transforms
-except ImportError as e:
-    print(f"Error importing MiDaS modules. Make sure the 'MiDaS' folder is in your project directory.")
-    print(f"Details: {e}")
-    sys.exit()
 
 # --- FLASK SETUP ---
 app = Flask(__name__)
@@ -34,32 +22,48 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 Path(UPLOAD_FOLDER).mkdir(exist_ok=True)
 
 # --- DEVICE SETUP ---
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 # --- Load Models (Only once when the server starts) ---
 try:
+    # YOLO model
     yolo_model = YOLO('best.pt')
-    midas_model = DPTDepthModel(path="MiDaS/dpt_hybrid_384.pt", backbone="vitb_rn50_384", non_negative=True)
-    midas_model.eval().to(device)
+
+    # MiDaS from Hugging Face
+    processor = DPTImageProcessor.from_pretrained("Intel/dpt-hybrid-midas")
+    midas_model = DPTForDepthEstimation.from_pretrained("Intel/dpt-hybrid-midas").to(device).eval()
+
+    # Regression model + feature order
     reg_model = joblib.load("regression_model.pkl")
     with open("regression_features.json") as f:
         feature_order = json.load(f)["feature_order"]
+
     print("All models loaded successfully.")
 except FileNotFoundError as e:
     print(f"Error: A required model file was not found. Please check your project folder.")
     print(f"Details: {e}")
     sys.exit()
 
-midas_transform = transforms.Compose([
-    Resize(384, 384, resize_target=None, keep_aspect_ratio=True,
-           ensure_multiple_of=32, resize_method="upper_bound",
-           image_interpolation_method=cv2.INTER_CUBIC),
-    NormalizeImage(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-    PrepareForNet()
-])
-
 # --- HELPER FUNCTIONS ---
+def run_midas(frame):
+    """Run depth estimation using Hugging Face MiDaS"""
+    img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    inputs = processor(images=img, return_tensors="pt").to(device)
+
+    with torch.no_grad():
+        outputs = midas_model(**inputs)
+        depth = outputs.predicted_depth
+
+    depth_resized = torch.nn.functional.interpolate(
+        depth.unsqueeze(1),
+        size=frame.shape[:2],
+        mode="bicubic",
+        align_corners=False
+    ).squeeze().cpu().numpy()
+
+    return depth_resized
+
 def impact_category(depth, width, length):
     two_wheeler = "low"
     four_wheeler = "low"
@@ -88,20 +92,8 @@ def process_frame(frame):
     # List to collect all pothole data for display
     pothole_info_list = []
     
-    # Prepare image for MiDaS
-    img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) / 255.0
-    input_batch = midas_transform({"image": img_rgb})["image"]
-    input_batch = torch.from_numpy(input_batch).unsqueeze(0).to(device)
-
-    # Get depth map
-    with torch.no_grad():
-        depth_map = midas_model(input_batch)
-        depth_map = torch.nn.functional.interpolate(
-            depth_map.unsqueeze(1),
-            size=frame.shape[:2],
-            mode="bicubic",
-            align_corners=False
-        ).squeeze().cpu().numpy()
+    # Run MiDaS (Hugging Face)
+    depth_map = run_midas(frame)
 
     for r in results:
         boxes = r.boxes
@@ -150,23 +142,20 @@ def process_frame(frame):
             })
 
     # --- Add all collected info to top-left of the image ---
-    y_offset = 40 # Starting position for text
+    y_offset = 40
     font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.8 # Larger font size for better readability
+    font_scale = 0.8
     font_thickness = 2
-    line_spacing = 30 # Spacing between lines
+    line_spacing = 30
 
     for i, info in enumerate(pothole_info_list):
         label = (f"Pothole {i+1}: D:{info['depth']:.1f}cm, W:{info['width']:.1f}cm, L:{info['length']:.1f}cm, "
                  f"2W Impact:{info['2W_impact']}, 4W Impact:{info['4W_impact']}")
         
-        # Add a black background for readability
         (text_width, text_height), baseline = cv2.getTextSize(label, font, font_scale, font_thickness)
         cv2.rectangle(annotated_frame, (10, y_offset - text_height - 5), (10 + text_width, y_offset + baseline), (0, 0, 0), -1)
-        
-        # Add the text
         cv2.putText(annotated_frame, label, (10, y_offset), font, font_scale, (0, 255, 0), font_thickness)
-        y_offset += line_spacing # Increase offset for the next line
+        y_offset += line_spacing
             
     return annotated_frame, pothole_info_list
 
@@ -175,7 +164,6 @@ def process_frame(frame):
 def upload_file():
     video_url = url_for('video_feed')
     
-    # Initialize variables with a default value
     uploaded_image = None
     txt_output = None
     pothole_data = None
@@ -203,7 +191,7 @@ def upload_file():
             
             uploaded_image = annotated_filename
             
-            # --- Save the pothole data to a TXT file ---
+            # Save pothole data to TXT
             txt_filename = file_stem + '.txt'
             txt_path = Path(app.config['UPLOAD_FOLDER']) / txt_filename
             with open(str(txt_path), 'w') as f:
@@ -219,25 +207,29 @@ def upload_file():
             
     return render_template('index.html', uploaded_image=uploaded_image, txt_output=txt_output, video_url=video_url)
 
-@app.route('/process_video', methods=['POST'])
-def process_video():
-    if 'frame' not in request.files:
-        return '', 400
+@app.route('/video_feed')
+def video_feed():
+    def generate_frames():
+        camera = cv2.VideoCapture(0)
+        if not camera.isOpened():
+            print("Error: Could not open camera.")
+            return
 
-    frame_file = request.files['frame'].read()
-    np_array = np.frombuffer(frame_file, np.uint8)
-    frame = cv2.imdecode(np_array, cv2.IMREAD_COLOR)
+        while True:
+            success, frame = camera.read()
+            if not success:
+                break
+            
+            processed_frame, _ = process_frame(frame)
+            ret, buffer = cv2.imencode('.jpg', processed_frame)
+            frame_bytes = buffer.tobytes()
 
-    if frame is None:
-        return '', 400
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
-    processed_frame, _ = process_frame(frame)
-    
-    ret, buffer = cv2.imencode('.jpg', processed_frame)
-    response_bytes = buffer.tobytes()
+        camera.release()
 
-    return Response(response_bytes, mimetype='image/jpeg')
-
+    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 if __name__ == '__main__':
     def allowed_file(filename):
