@@ -1,0 +1,4 @@
+READ ME
+Run the app.py file in the codespace.
+The real-time detection will work if you download the repository in local system and run app.py.
+You can upload photos of pothole and get outputs accordingly.
